@@ -852,6 +852,7 @@ Sam</textarea>
             washerwoman: {
                 id: 'washerwoman',
                 name: 'Washerwoman',
+                // icon: './icons/icon_washerwoman.png',
                 team: 'townsfolk',
                 ability: 'You start knowing that 1 of 2 players is a particular Townsfolk.',
                 firstNight: true,
@@ -2375,6 +2376,15 @@ Sam</textarea>
 
                     // Debug individual role lookup
                     console.log(`Player ${player}: roleId=${roleId}, role=`, role);
+
+                    /*
+                    const iconDiv = document.createElement('div');
+                    iconDiv.style['background-image'] = `url('${role.icon}')`;
+                    iconDiv.style['background-repeat'] = 'no-repeat';
+                    iconDiv.style['background-size'] = 'cover';
+                    iconDiv.style['background-position'] = 'center';
+                    playerCard.appendChild(iconDiv);
+                    */
 
                     roleDiv.innerHTML = role ?
                         `<span class="role-${role.team}">${role.name}</span>` :
