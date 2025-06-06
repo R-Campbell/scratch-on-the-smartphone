@@ -382,16 +382,18 @@ Sam</textarea>
         let currentUser = '';
         let currentRoom = '';
         let userType = '';
-        let players = [];
+        // Consolidated player state management
+        let playerState = {
+            players: [],
+            currentUserId: null,
+            selectedPlayerId: null
+        };
         let isConnected = false;
         let currentTemplate = null;
         let sentMessages = new Map(); // Track messages we've sent locally
         let mostRecentSetupTimestamp = 0;
-        let playerRoles = {}; // Track role assignments
         let selectedPlayerForRole = null;
         let currentGameId = null;
-        let playerReminders = {}; // Track reminders for each player
-        let playerDeathState = {}; // Track alive/dead status for each player
         let isNightTime = true; // Game starts at night
         let dayNightCounter = 1; // Game starts on night 1
 
@@ -403,6 +405,56 @@ Sam</textarea>
         let gameMode = 'new'; // 'new' or 'reconnect'
         let selectedRoles = []; // Roles selected for the current game
         let targetDistribution = {}; // Target role distribution
+
+        // Helper functions for player state management
+        function getPlayerById(playerId) {
+            return playerState.players.find(p => p.id === playerId) || null;
+        }
+
+        function getPlayerByName(playerName) {
+            return playerState.players.find(p => p.name === playerName) || null;
+        }
+
+        function addPlayer(playerData) {
+            const existingPlayer = getPlayerById(playerData.id);
+            if (existingPlayer) {
+                // Update existing player
+                Object.assign(existingPlayer, playerData);
+                return existingPlayer;
+            } else {
+                // Create new player with defaults
+                const newPlayer = {
+                    id: playerData.id,
+                    name: playerData.name || '',
+                    seatPosition: playerData.seatPosition || 0,
+                    role: playerData.role || null,
+                    reminders: playerData.reminders || [],
+                    isAlive: playerData.isAlive !== undefined ? playerData.isAlive : true,
+                    hasGhostVote: playerData.hasGhostVote !== undefined ? playerData.hasGhostVote : true,
+                    isOnline: playerData.isOnline !== undefined ? playerData.isOnline : false
+                };
+                playerState.players.push(newPlayer);
+                return newPlayer;
+            }
+        }
+
+        function removePlayer(playerId) {
+            const index = playerState.players.findIndex(p => p.id === playerId);
+            if (index !== -1) {
+                return playerState.players.splice(index, 1)[0];
+            }
+            return null;
+        }
+
+        function updatePlayerProperty(playerId, property, value) {
+            const player = getPlayerById(playerId);
+            if (player) {
+                player[property] = value;
+                return true;
+            }
+            return false;
+        }
+
 
         function generateGameId(roomId) {
             // Extract room name and increment counter
@@ -578,10 +630,22 @@ Sam</textarea>
 
                     // Load the selected script
                     currentScript = EMBEDDED_SCRIPTS[scriptId];
-                    players = playerNamesText.split('\n').map(name => name.trim()).filter(name => name);
+                    const playerNames = playerNamesText.split('\n').map(name => name.trim()).filter(name => name);
+                    
+                    // Initialize playerState with new players
+                    playerState.players = playerNames.map((name, index) => ({
+                        id: `player_${index + 1}`,
+                        name: name,
+                        seatPosition: index + 1,
+                        role: null,
+                        reminders: [],
+                        isAlive: true,
+                        hasGhostVote: true,
+                        isOnline: false
+                    }));
 
                     // Calculate target distribution
-                    const playerCount = players.length;
+                    const playerCount = playerState.players.length;
                     if (ROLE_COUNTS[playerCount]) {
                         targetDistribution = ROLE_COUNTS[playerCount];
                         currentGameId = generateGameId(currentRoom);
@@ -638,13 +702,12 @@ Sam</textarea>
         }
 
         function initializePlayerRoles() {
-            playerRoles = {};
-            playerReminders = {};
-            playerDeathState = {};
-            players.forEach(player => {
-                playerRoles[player] = null;
-                playerReminders[player] = [];
-                playerDeathState[player] = 'alive'; // 'alive' or 'dead'
+            // Initialize using new playerState structure
+            playerState.players.forEach(player => {
+                player.role = null;
+                player.reminders = [];
+                player.isAlive = true;
+                player.hasGhostVote = true; // Default to having ghost vote
             });
         }
 
@@ -714,8 +777,8 @@ Sam</textarea>
                     mostRecentSetupTimestamp = message.timestamp;
 
                     // Reconstruct basic game state
-                    if (message.players) {
-                        players = message.players;
+                    if (message.playerState) {
+                        playerState = message.playerState;
                     }
                     if (message.script) {
                         if (typeof message.script === 'string') {
@@ -725,33 +788,9 @@ Sam</textarea>
                             currentScript = message.script;
                         }
                     }
-                    if (message.playerRoles) {
-                        playerRoles = message.playerRoles;
-                    }
-                    if (message.playerReminders) {
-                        playerReminders = message.playerReminders;
-                    }
                 }
             }
 
-            if (message.type === 'seat_assignment' && message.gameId === currentGameId && message.players) {
-                players = message.players;
-            }
-
-            // Update role assignments from more recent role_assignment messages
-            if (message.type === 'role_assignment' && message.gameId === currentGameId && message.playerRoles) {
-                playerRoles = { ...playerRoles, ...message.playerRoles };
-            }
-
-            // Update reminders from more recent reminder_update messages
-            if (message.type === 'reminder_update' && message.gameId === currentGameId && message.playerReminders) {
-                playerReminders = { ...playerReminders, ...message.playerReminders };
-            }
-
-            // Update death state from more recent death_update messages
-            if (message.type === 'death_update' && message.gameId === currentGameId && message.playerDeathState) {
-                playerDeathState = { ...playerDeathState, ...message.playerDeathState };
-            }
 
             // Reconstruct phase state from daybreak/nightfall messages
             if ((message.type === 'daybreak' || message.type === 'nightfall') && message.gameId === currentGameId) {
@@ -787,15 +826,13 @@ Sam</textarea>
 
 
         function sendGameSetup() {
-          console.log('sendGameSetup called, currentScript:', currentScript); // Add this line
+          console.log('sendGameSetup called, currentScript:', currentScript);
+          
           const setupMessage = {
                 gameId: currentGameId,
                 type: 'game_setup',
-                players: players,
+                playerState: playerState,
                 script: currentScript,
-                playerRoles: playerRoles,
-                playerReminders: playerReminders,
-                playerDeathState: playerDeathState,
                 storyteller: currentUser,
                 timestamp: Date.now()
             };
@@ -851,7 +888,10 @@ Sam</textarea>
                         }
 
                         // Process this setup message
-                        players = message.players;
+                        // Update playerState from incoming message
+                        if (message.playerState) {
+                            playerState = message.playerState;
+                        }
 
                         // Process script information
                         if (message.script) {
@@ -876,18 +916,10 @@ Sam</textarea>
                 } else if (message.gameId === currentGameId) {
                     // Storytellers only process their own game's setup messages
                     mostRecentSetupTimestamp = message.timestamp;
-                    players = message.players;
-
-                    if (message.playerRoles) {
-                        playerRoles = message.playerRoles;
-                    }
-
-                    if (message.playerReminders) {
-                        playerReminders = message.playerReminders;
-                    }
-
-                    if (message.playerDeathState) {
-                        playerDeathState = message.playerDeathState;
+                    
+                    // Update playerState from message
+                    if (message.playerState) {
+                        playerState = message.playerState;
                     }
 
                     // Look up the full script object from the script name/id
@@ -914,33 +946,6 @@ Sam</textarea>
                 // Don't respond to historical requests
                 if (!isFromHistory) {
                     sendGameSetup();
-                }
-            } else if (message.type === 'role_assignment' && userType === 'storyteller' &&
-                      message.gameId === currentGameId) {
-                // Update local role assignments
-                if (message.playerRoles) {
-                    playerRoles = message.playerRoles;
-                    updatePlayersList();
-                }
-            } else if (message.type === 'seat_assignment' && userType === 'storyteller' &&
-                      message.gameId === currentGameId) {
-                // Update local role assignments
-                if (message.players) {
-                    players = message.players;
-                    updatePlayersList();
-                }
-            } else if (message.type === 'reminder_update' && userType === 'storyteller' &&
-                       message.gameId === currentGameId) {
-                // Update local reminder assignments
-                if (message.playerReminders) {
-                    playerReminders = message.playerReminders;
-                    updatePlayersList();
-                }
-            } else if (message.type === 'death_update' && message.gameId === currentGameId) {
-                // Update local death state
-                if (message.playerDeathState) {
-                    playerDeathState = message.playerDeathState;
-                    updatePlayersList();
                 }
             } else if (message.type === 'daybreak' && message.gameId === currentGameId) {
                 setDayPhase();
@@ -1028,7 +1033,7 @@ Sam</textarea>
         }
 
         function getLivingPlayerCount() {
-            return players.filter(player => playerDeathState[player] !== 'dead').length;
+            return playerState.players.filter(player => player.isAlive).length;
         }
 
         function getMajorityVotes() {
@@ -1050,10 +1055,11 @@ Sam</textarea>
             playersList.innerHTML = '';
 
             // Debug log to see what we're working with
-            console.log('updatePlayersList called, playerRoles:', playerRoles);
+            console.log('updatePlayersList called, playerState:', playerState);
             console.log('currentScript:', currentScript);
 
-          players.forEach((player, index) => {
+          playerState.players.forEach((playerObj, index) => {
+            const player = playerObj.name;
             const playerCard = document.createElement('div');
                 playerCard.className = 'player-card';
 
@@ -1062,12 +1068,21 @@ Sam</textarea>
                 seatDiv.textContent = `Seat ${index+1}`;
                 playerCard.appendChild(seatDiv);
 
-                const isDead = playerDeathState[player] === 'dead';
+                const isDead = !playerObj.isAlive;
 
                 const nameDiv = document.createElement('div');
                 nameDiv.className = 'player-name';
-                nameDiv.textContent = player;
-                nameDiv.textContent = isDead ? `💀 ${player} 💀` : player;
+                
+                // Show death and ghost vote status with emojis
+                let displayName = player;
+                if (isDead) {
+                    if (playerObj.hasGhostVote) {
+                        displayName = `💀👻 ${player} 👻💀`;
+                    } else {
+                        displayName = `💀⚰️ ${player} ⚰️💀`;
+                    }
+                }
+                nameDiv.textContent = displayName;
                 playerCard.appendChild(nameDiv);
 
                 // Add death styling if player is dead
@@ -1080,7 +1095,7 @@ Sam</textarea>
                 if (userType === 'storyteller') {
                     const roleDiv = document.createElement('div');
                     roleDiv.className = 'player-role';
-                    const roleId = playerRoles[player];
+                    const roleId = playerObj.role;
                     const role = roleId ? getRoleById(roleId) : null;
 
                     // Debug individual role lookup
@@ -1092,14 +1107,14 @@ Sam</textarea>
                     playerCard.appendChild(roleDiv);
 
                     // Show reminders if any
-                    if (playerReminders[player] && playerReminders[player].length > 0) {
+                    if (playerObj.reminders && playerObj.reminders.length > 0) {
                         const remindersDiv = document.createElement('div');
                         remindersDiv.className = 'player-reminders';
                         remindersDiv.style.fontSize = '0.7rem';
                         remindersDiv.style.opacity = '0.8';
                         remindersDiv.style.marginTop = '3px';
                         remindersDiv.style.fontStyle = 'italic';
-                        remindersDiv.innerHTML = playerReminders[player].map(reminder => `• ${reminder}`).join('<br>');
+                        remindersDiv.innerHTML = playerObj.reminders.map(reminder => `• ${reminder}`).join('<br>');
                         playerCard.appendChild(remindersDiv);
                     }
 
@@ -1144,8 +1159,8 @@ Sam</textarea>
         }
 
         function getOrderedPlayersForNight() {
-            if (!currentScript || players.length === 0) {
-                return players; // Return original order if no script or players
+            if (!currentScript || playerState.players.length === 0) {
+                return playerState.players.map(p => p.name); // Return player names if no script
             }
 
             // Determine which night order to use
@@ -1154,11 +1169,11 @@ Sam</textarea>
                 : currentScript.other_night_order;
 
             if (!nightOrder || nightOrder.length === 0) {
-                return players; // Return original order if no night order defined
+                return playerState.players.map(p => p.name); // Return player names if no night order
             }
 
             console.log('getOrderedPlayersForNight Night order for night', dayNightCounter, ':', nightOrder);
-            console.log('getOrderedPlayersForNight Player roles:', playerRoles);
+            console.log('getOrderedPlayersForNight Player roles:', playerState.players.map(p => ({name: p.name, role: p.role})));
 
             const orderedPlayers = [];
             const usedPlayers = new Set(); // Track which players we've already added
@@ -1166,26 +1181,26 @@ Sam</textarea>
             // First, add players in night order
             nightOrder.forEach(roleId => {
                 // Find the player with this role
-                const playerWithRole = players.find(player =>
-                    playerRoles[player] === roleId && !usedPlayers.has(player)
+                const playerWithRole = playerState.players.find(player =>
+                    player.role === roleId && !usedPlayers.has(player.name)
                 );
                 if (playerWithRole) {
-                    console.log('getOrderedPlayersForNight Adding player', playerWithRole, 'for role', roleId);
-                    orderedPlayers.push(playerWithRole);
-                    usedPlayers.add(playerWithRole);
+                    console.log('getOrderedPlayersForNight Adding player', playerWithRole.name, 'for role', roleId);
+                    orderedPlayers.push(playerWithRole.name);
+                    usedPlayers.add(playerWithRole.name);
                 }
             });
 
             // Add any remaining players at the end
-            const hasRemainingPlayers = players.some(player => !usedPlayers.has(player));
+            const hasRemainingPlayers = playerState.players.some(player => !usedPlayers.has(player.name));
             if (hasRemainingPlayers && orderedPlayers.length > 0) {
                 orderedPlayers.push('-----'); // Separator
             }
 
-            players.forEach(player => {
-                if (!usedPlayers.has(player)) {
-                    console.log('getOrderedPlayersForNight Adding remaining player', player);
-                    orderedPlayers.push(player);
+            playerState.players.forEach(player => {
+                if (!usedPlayers.has(player.name)) {
+                    console.log('getOrderedPlayersForNight Adding remaining player', player.name);
+                    orderedPlayers.push(player.name);
                 }
         });
 
@@ -1194,7 +1209,7 @@ Sam</textarea>
         }
 
         function populateTargetPlayerDropdown() {
-            if (userType === 'storyteller' && players.length > 0) {
+            if (userType === 'storyteller' && playerState.players.length > 0) {
                 const targetSelect = document.getElementById('targetPlayer');
                 targetSelect.innerHTML = '<option value="">Select player...</option>';
                 const orderedPlayers = getOrderedPlayersForNight();
@@ -1276,12 +1291,13 @@ Sam</textarea>
             }
 
             // Set current role if any
-            if (playerRoles[playerName]) {
-                roleSelect.value = playerRoles[playerName];
+            const player = getPlayerByName(playerName);
+            if (player && player.role) {
+                roleSelect.value = player.role;
             }
 
             // Update death toggle button text based on current state
-            const isAlive = playerDeathState[playerName] !== 'dead';
+            const isAlive = player ? player.isAlive : true;
             deathToggleBtn.textContent = isAlive ? '💀 Dies' : '⚡ Reborn';
             deathToggleBtn.style.background = isAlive ?
                 'linear-gradient(45deg, #9b59b6, #8e44ad)' :
@@ -1302,7 +1318,10 @@ Sam</textarea>
             const selectedRole = roleSelect.value || null;
 
             // Update local state
-            playerRoles[selectedPlayerForRole] = selectedRole;
+            const player = getPlayerByName(selectedPlayerForRole);
+            if (player) {
+                player.role = selectedRole;
+            }
 
             // Broadcast role assignment to other storytellers (if any)
             pubnub.publish({
@@ -2226,7 +2245,7 @@ Sam</textarea>
             document.getElementById('roleSelectionScreen').classList.remove('hidden');
 
             document.getElementById('roleSelectionScript').textContent = currentScript.name;
-            document.getElementById('roleSelectionPlayerCount').textContent = players.length;
+            document.getElementById('roleSelectionPlayerCount').textContent = playerState.players.length;
             document.getElementById('roleSelectionGameId').textContent = currentGameId || 'Not set';
 
             // Initialize PubNub connection and send game setup so players can join during role selection
@@ -2404,7 +2423,7 @@ Sam</textarea>
         }
 
         function distributeSelectedRolesToPlayers() {
-            if (selectedRoles.length === 0 || players.length === 0) {
+            if (selectedRoles.length === 0 || playerState.players.length === 0) {
                 return;
             }
 
@@ -2420,7 +2439,7 @@ Sam</textarea>
             }
 
             // Shuffle the players
-            const shuffledPlayers = [...players];
+            const shuffledPlayers = [...playerState.players];
             for (let i = shuffledPlayers.length - 1; i > 0; i--) {
                 const j = Math.floor(Math.random() * (i + 1));
                 [shuffledPlayers[i], shuffledPlayers[j]] = [shuffledPlayers[j], shuffledPlayers[i]];
@@ -2431,7 +2450,7 @@ Sam</textarea>
 
             // Assign roles to players
             for (let i = 0; i < Math.min(shuffledPlayers.length, rolesToDistribute.length); i++) {
-                playerRoles[shuffledPlayers[i]] = rolesToDistribute[i].id;
+                shuffledPlayers[i].role = rolesToDistribute[i].id;
             }
 
         console.log('Roles distributed:', playerRoles); // Debug line
